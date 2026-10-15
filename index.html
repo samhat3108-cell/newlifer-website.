@@ -1,123 +1,122 @@
-'use strict';
-const http = require('node:http');
-const fs = require('node:fs');
-const path = require('node:path');
-const crypto = require('node:crypto');
+newlifer.com
+Admin login
+PROFESSIONAL SURFACE CLEANING
+A fresh start for every surface.
+From carpets and walls to patios and driveways, Newlifer helps make your spaces feel new again. Easy booking. Professional results.
+Book a cleaning ↗
+Explore services
+Local cleaning service · Final quotes depend on size, condition and access.
 
-const ROOT = __dirname;
-const PUBLIC = path.join(ROOT, 'public');
-const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, 'data');
-const DATA_FILE = path.join(DATA_DIR, 'bookings.json');
-const PORT = Number(process.env.PORT || 3000);
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-const sessions = new Map();
-const statuses = new Set(['Pending', 'Confirmed', 'Completed', 'Cancelled']);
 
-function ensureData() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, '[]\n', { mode: 0o600 });
-}
-function readBookings() {
-  ensureData();
-  try { const v = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); return Array.isArray(v) ? v : []; }
-  catch { return []; }
-}
-function writeBookings(items) { ensureData(); fs.writeFileSync(DATA_FILE, JSON.stringify(items, null, 2) + '\n', { mode: 0o600 }); }
-function send(res, status, obj, headers = {}) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers });
-  res.end(JSON.stringify(obj));
-}
-function getBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = ''; let size = 0;
-    req.on('data', chunk => { size += chunk.length; if (size > 50000) { reject(new Error('Request too large')); req.destroy(); } else data += chunk; });
-    req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch { reject(new Error('Invalid JSON')); } });
-    req.on('error', reject);
-  });
-}
-function authorized(req) {
-  const header = req.headers.authorization || '';
-  if (!header.startsWith('Bearer ')) return false;
-  const token = header.slice(7); const expiry = sessions.get(token);
-  if (!expiry || expiry < Date.now()) { sessions.delete(token); return false; }
-  return true;
-}
-function clean(v, max = 1000) { return String(v ?? '').trim().slice(0, max); }
-function safeEqual(a, b) {
-  const aa = Buffer.from(String(a)); const bb = Buffer.from(String(b));
-  return aa.length === bb.length && crypto.timingSafeEqual(aa, bb);
-}
-async function handleAPI(req, res, url) {
-  if (req.method === 'POST' && url.pathname === '/api/login') {
-    if (!ADMIN_PASSWORD) return send(res, 503, { error: 'Admin login is not configured. Set ADMIN_PASSWORD on the server.' });
-    let body; try { body = await getBody(req); } catch (e) { return send(res, 400, { error: e.message }); }
-    if (!safeEqual(clean(body.password, 300), ADMIN_PASSWORD)) return send(res, 401, { error: 'Invalid password' });
-    const token = crypto.randomBytes(32).toString('hex'); sessions.set(token, Date.now() + 12 * 60 * 60 * 1000);
-    return send(res, 200, { token });
-  }
-  if (url.pathname === '/api/bookings' && req.method === 'POST') {
-    let body; try { body = await getBody(req); } catch (e) { return send(res, 400, { error: e.message }); }
-    const name = clean(body.name, 120), phone = clean(body.phone, 80), email = clean(body.email, 180), service = clean(body.service, 100), date = clean(body.date, 20), time = clean(body.time, 40), address = clean(body.address, 300);
-    if (!name || !phone || !email || !service || !date || !time || !address) return send(res, 400, { error: 'Please complete all required fields.' });
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return send(res, 400, { error: 'Please enter a valid email address.' });
-    const item = { id: 'NL-' + crypto.randomBytes(4).toString('hex').toUpperCase(), name, phone, email, service, date, time, address, size: clean(body.size, 100), urgency: clean(body.urgency, 80), details: clean(body.details, 2000), status: 'Pending', created: new Date().toISOString() };
-    const items = readBookings(); items.unshift(item); writeBookings(items);
-    return send(res, 201, { booking: item });
-  }
-  if (url.pathname === '/api/bookings' && req.method === 'GET') {
-    if (!authorized(req)) return send(res, 401, { error: 'Please log in.' });
-    return send(res, 200, { bookings: readBookings() });
-  }
-  const match = url.pathname.match(/^\/api\/bookings\/([A-Za-z0-9-]+)$/);
-  if (match && req.method === 'PATCH') {
-    if (!authorized(req)) return send(res, 401, { error: 'Please log in.' });
-    let body; try { body = await getBody(req); } catch (e) { return send(res, 400, { error: e.message }); }
-    if (!statuses.has(body.status)) return send(res, 400, { error: 'Invalid status.' });
-    const items = readBookings(); const item = items.find(x => x.id === match[1]);
-    if (!item) return send(res, 404, { error: 'Booking not found.' });
-    item.status = body.status; writeBookings(items); return send(res, 200, { booking: item });
-  }
-  if (req.method === 'POST' && url.pathname === '/api/ai') {
-    let body; try { body = await getBody(req); } catch (e) { return send(res, 400, { error: e.message }); }
-    const message = clean(body.message, 3000); const admin = body.mode === 'admin';
-    if (!message) return send(res, 400, { error: 'Enter a message.' });
-    if (admin && !authorized(req)) return send(res, 401, { error: 'Please log in to use the admin assistant.' });
-    if (!OPENAI_API_KEY) return send(res, 200, { reply: localReply(message, admin) });
-    try {
-      const system = admin
-        ? 'You are Newlifer, a practical assistant for a small professional surface-cleaning business. Help summarize business operations and draft customer replies. You cannot send messages, change bookings, or claim actions were completed. Prices on the site are indicative placeholders and must be verified.'
-        : 'You are Newliferâs customer-facing cleaning concierge. Answer politely about carpet, wall/facade, terrace/patio, driveway and custom cleaning. The website prices are indicative placeholders: carpet CHF 80, wall/facade CHF 120, terrace/patio CHF 100. Never promise availability or confirm an appointment. Tell users to submit the booking form and await confirmation. Do not claim services, insurance, credentials or service areas not provided.';
-      const r = await fetch('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { Authorization: 'Bearer ' + OPENAI_API_KEY, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: OPENAI_MODEL, messages: [{ role: 'system', content: system }, { role: 'user', content: message }], temperature: 0.4 }) });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error?.message || 'AI provider request failed');
-      return send(res, 200, { reply: data.choices?.[0]?.message?.content || 'Sorry, I could not prepare an answer.' });
-    } catch (e) { return send(res, 502, { error: 'AI is temporarily unavailable.', reply: localReply(message, admin) }); }
-  }
-  return send(res, 404, { error: 'Not found' });
-}
-function localReply(message, admin) {
-  const q = message.toLowerCase();
-  if (admin && /pending|summary|booking|appointment/.test(q)) { const b = readBookings(); return `Basic summary: ${b.length} total requests, ${b.filter(x => x.status === 'Pending').length} pending, ${b.filter(x => x.status === 'Confirmed').length} confirmed. Configure OPENAI_API_KEY for a more capable AI assistant.`; }
-  if (/price|cost|how much/.test(q)) return 'Indicative starting prices: CHF 80 for carpet cleaning, CHF 120 for wall/facade cleaning, and CHF 100 for terrace/patio cleaning. Final prices depend on size, material, condition and access.';
-  if (/book|appointment|date|schedule/.test(q)) return 'Please use the booking form to request a date and time. Your request is pending until Newlifer reviews and confirms it.';
-  if (/carpet/.test(q)) return 'Carpet cleaning is listed from an indicative CHF 80. Add the approximate size and stains to your booking request.';
-  if (/wall|facade/.test(q)) return 'Wall and facade cleaning is listed from an indicative CHF 120. The material and condition need to be assessed first.';
-  if (/terrace|patio|driveway|outside/.test(q)) return 'We can assess terraces, patios, driveways and suitable hard surfaces. The indicative starting price is around CHF 100 for terrace/patio work.';
-  return 'I can help with Newlifer services, indicative prices and booking requests. What surface needs cleaning, roughly how large is it, and in which area?';
-}
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  if (url.pathname.startsWith('/api/')) { try { await handleAPI(req, res, url); } catch (e) { if (!res.headersSent) send(res, 500, { error: 'Server error' }); } return; }
-  if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, { error: 'Method not allowed' });
-  let pathname = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname);
-  const file = path.resolve(PUBLIC, '.' + pathname);
-  if (!file.startsWith(PUBLIC + path.sep) && file !== path.join(PUBLIC, 'index.html')) return send(res, 403, { error: 'Forbidden' });
-  fs.readFile(file, (err, data) => {
-    if (err) { res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }); return res.end('Not found'); }
-    const ext = path.extname(file).toLowerCase(); const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.webp': 'image/webp' };
-    res.writeHead(200, { 'Content-Type': types[ext] || 'application/octet-stream', 'X-Content-Type-Options': 'nosniff' }); res.end(req.method === 'HEAD' ? undefined : data);
-  });
-});
-server.listen(PORT, '0.0.0.0', () => console.log(`Newlifer running on port ${PORT}`));
+
+Clean deeper. Live fresher.
+Professional cleaning for homes and businesses.
+WHAT WE CLEAN
+Choose your service
+Tell us what needs refreshing. We'll take it from there.
+▦
+Carpet cleaning
+Deep cleaning to lift everyday dirt and refresh fibres.
+From CHF 80
+▤
+Wall & facade
+Careful cleaning for suitable interior and exterior surfaces.
+From CHF 120
+⌂
+Terrace & patio
+Refresh outdoor paving, stone and selected hard surfaces.
+From CHF 100
+✦
+Driveway & other
+Tell us what needs cleaning and we'll assess the job.
+Custom quote
+Prices are indicative examples and must be confirmed by Newlifer.
+ABOUT NEWLIFER
+Careful cleaning. A fresher space.
+Newlifer is a surface-cleaning service concept focused on helping homes and businesses refresh carpets, walls and outdoor hard surfaces. Every job starts by understanding the material, the condition and the result you want, so the cleaning approach can be chosen with care.
+✓
+Surface-first approach
+We consider the material and condition before recommending a cleaning method.
+◷
+Easy booking
+Send your preferred date and details online; your request is reviewed before confirmation.
+⌂
+Homes & businesses
+Tell us about your space and we can assess the job and the access needed.
+↗
+Clear expectations
+We aim to discuss the surface, scope and quote before work begins.
+EXAMPLES OF JOBS
+What a refresh can look like
+These are example job types, not before-and-after photos of completed Newlifer projects.
+▦
+Carpet refresh
+Target everyday dirt and visible marks, with the method adapted to the carpet fibre.
+▤
+Wall & facade care
+Assess suitable surfaces and choose a careful approach for the material and finish.
+⌂
+Patio revival
+Refresh suitable paving and outdoor hard surfaces while considering drainage and surroundings.
+✦
+Driveway clean
+Review surface type, staining and size to establish the right scope and quote.
+SIMPLE FROM START TO FINISH
+How it works
+01
+Choose a service
+Pick the surface and share a few details.
+02
+Request a time
+Choose your preferred date and time.
+03
+We confirm
+Your appointment is pending until confirmed.
+04
+Enjoy the refresh
+Our team arrives ready to get to work.
+QUESTIONS, ANSWERED
+Frequently asked questions
+Are the prices fixed?
+Prices shown are indicative starting examples only. Final pricing depends on size, material, condition and access.
+Is my booking confirmed immediately?
+No. Submitting the form sends a request. Newlifer must review and confirm the date and time.
+What areas do you cover?
+Enter your address or area in the booking form. The service area should be confirmed before launch.
+Do you clean every surface?
+Not every material is suitable for every method. The surface should be assessed first to help avoid damage.
+Can I ask for a custom quote?
+Yes. Choose the custom option and describe the surface, approximate size and any visible stains.
+How do I change my appointment?
+Contact Newlifer directly using the business contact details once they have been added to the website.
+LET'S GET STARTED
+Book your cleaning.
+Send a request in under two minutes. We'll review the details and get back to you to confirm the appointment and final price.
+✓ No payment required to request ✓ Clear communication ✓ Tailored service
+Full name *
+
+Phone *
+
+Email *
+
+Cleaning service *
+Choose serviceCarpet cleaningWall & facade cleaningTerrace & patio cleaningDriveway cleaningOther / custom quote
+Preferred date *
+Preferred time *
+Choose time08:00–10:0010:00–12:0012:00–14:0014:00–16:0016:00–18:00
+Service address *
+
+Approx. size
+Not sureSmallMediumLarge
+How soon?
+FlexibleAs soon as possibleWithin 2 weeks
+Additional details
+
+I agree that Newlifer may use these details to respond to my booking request.
+Request appointment →
+Submitting a request does not mean the appointment is confirmed.
+
+newlifer.com
+A fresh start for every surface.
+© Newlifer
+✦ Ask Newlifer AI
